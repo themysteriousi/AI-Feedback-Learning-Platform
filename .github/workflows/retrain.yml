@@ -1,0 +1,137 @@
+name: 🤖 MLOps — Prepare DPO Dataset & Deploy Model
+
+# Triggers:
+# 1. Manual trigger from GitHub Actions UI (with inputs)
+# 2. Scheduled: every Sunday at midnight UTC (weekly retraining check)
+on:
+  workflow_dispatch:
+    inputs:
+      hf_model_repo:
+        description: "Hugging Face model repo to deploy (e.g. username/model)"
+        required: true
+        type: string
+      skip_dataset_export:
+        description: "Skip dataset export (use existing data/dpo_dataset.jsonl)"
+        required: false
+        default: "false"
+        type: boolean
+
+  schedule:
+    - cron: "0 0 * * 0"  # Every Sunday at midnight UTC
+
+env:
+  AWS_REGION:      us-east-1
+  S3_BUCKET:       ${{ secrets.DATA_LAKE_BUCKET }}
+  S3_PREFIX:       feedback/raw/
+  LAMBDA_FUNCTION: ${{ secrets.INFERENCE_LAMBDA_NAME }}
+
+jobs:
+  # ──────────────────────────────────────────────────────────
+  # Job 1: Export DPO dataset from S3 and upload as artifact
+  # ──────────────────────────────────────────────────────────
+  export-dataset:
+    name: 📥 Export DPO Dataset from S3
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Export preference pairs from S3
+        if: ${{ github.event.inputs.skip_dataset_export != 'true' }}
+        run: |
+          python src/mlops/prepare_dataset.py \
+            --bucket ${{ env.S3_BUCKET }} \
+            --prefix ${{ env.S3_PREFIX }} \
+            --output data/dpo_dataset.jsonl
+
+      - name: Check dataset size
+        run: |
+          COUNT=$(wc -l < data/dpo_dataset.jsonl)
+          echo "📊 Preference pairs in dataset: $COUNT"
+          if [ "$COUNT" -lt "10" ]; then
+            echo "⚠️  Dataset too small for training (< 10 pairs). Skipping."
+            echo "SKIP_TRAINING=true" >> $GITHUB_ENV
+          fi
+
+      - name: Upload dataset as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dpo-dataset
+          path: data/dpo_dataset.jsonl
+          retention-days: 7
+
+  # ──────────────────────────────────────────────────────────
+  # Job 2: Deploy the trained model (after manual Colab training)
+  # Runs only when a model repo is provided via workflow_dispatch
+  # ──────────────────────────────────────────────────────────
+  deploy-model:
+    name: 🚀 Deploy Fine-Tuned Model to Lambda
+    runs-on: ubuntu-latest
+    needs: export-dataset
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.hf_model_repo != '' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region:            ${{ env.AWS_REGION }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install boto3
+
+      - name: Deploy model & update Lambda
+        run: |
+          python src/mlops/deploy_model.py \
+            --hf-repo   "${{ github.event.inputs.hf_model_repo }}" \
+            --bucket    ${{ env.S3_BUCKET }} \
+            --function  ${{ env.LAMBDA_FUNCTION }} \
+            --region    ${{ env.AWS_REGION }}
+
+      - name: 🧪 Smoke test the updated API
+        run: |
+          API_URL="${{ secrets.API_GATEWAY_URL }}"
+          RESPONSE=$(curl -s -X POST "$API_URL/generate" \
+            -H "Content-Type: application/json" \
+            -d '{"prompt": "What is machine learning?"}')
+          echo "API Response: $RESPONSE"
+          # Fail the workflow if the response is empty or contains an error key
+          echo "$RESPONSE" | python -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          assert 'response' in data, f'Smoke test FAILED: {data}'
+          print('✅ Smoke test passed!')
+          "
+
+      - name: Post deployment summary
+        run: |
+          echo "## 🚀 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Model:** ${{ github.event.inputs.hf_model_repo }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Lambda:** ${{ env.LAMBDA_FUNCTION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployed at:** $(date -u)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Status:** ✅ Active" >> $GITHUB_STEP_SUMMARY

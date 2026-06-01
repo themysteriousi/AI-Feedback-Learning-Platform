@@ -1,0 +1,56 @@
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Dependencies and package managers
+node_modules/
+dist/
+build/
+.npm
+package-lock.json
+
+# Environment files
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+.env.*
+
+# Python caches and environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Terraform states and caches
+.terraform/
+*.tfstate
+*.tfstate.backup
+.terraform.lock.hcl
+*.tfvars
+*.tfvars.json
+
+# Streamlit local credentials and cache
+.streamlit/config.toml
+.streamlit/secrets.toml
+.streamlit/runtime/
+
+# ZIP build directories
+build/
+*.zip
+*.tar.gz
